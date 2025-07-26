@@ -2,13 +2,22 @@ import os
 from dotenv import load_dotenv
 import telebot
 from telebot import types
-from supabase_utils import save_registration_to_supabase, get_webinar_dates, fetch_registrations
+from supabase_utils import save_registration_to_supabase, get_webinar_dates, fetch_registrations, get_service_account_credentials
 from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
+import io
+import requests
+import pandas as pd
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 # Load environment variables from .env file
 load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+
+# Easily editable sync interval (in minutes)
+SYNC_INTERVAL_MINUTES = 30
+EXCEL_FILE_NAME = 'WebinarRegistrations.xlsx'
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -18,8 +27,6 @@ user_data = {}
 # APScheduler setup
 scheduler = BackgroundScheduler(timezone=timezone.utc)
 scheduler.start()
-
-
 
 def get_webinars_by_id():
     webinars = get_webinar_dates()
@@ -51,43 +58,11 @@ def schedule_reminders_for_registration(reg, webinars_by_id):
     reminders = []
     # Only schedule reminders that are in the future
     if webinar_dt - timedelta(days=1) > now:
-        reminders.append((webinar_dt - timedelta(days=1), f"""Уже завтра! 🚀
-
- В {webinar_dt.strftime('%H:%M')} начнётся вебинар которого не было в Казахстане. Ты узнаешь секреты спортивной фотосессии. 
-
-После вебинара ты уже будешь знать:
-
-✅ Как выйти на стабильную съёмку спортивных мероприятий
-✅ Какие настройки использовать для крутых кадров
-✅ И как сразу получать заказы без рекламы и продвижения
-
-⚠ Записи вебинара не будет — будь онлайн, чтобы не упустить возможности!"""))
+        reminders.append((webinar_dt - timedelta(days=1), f"📅 Reminder: Your webinar is tomorrow at {webinar_dt.strftime('%H:%M')}!"))
     if webinar_dt - timedelta(hours=1) > now:
-        reminders.append((webinar_dt - timedelta(hours=1), f"""Через час! 🔥
-
-Вебинар которого не было в Казахстане, стартует совсем скоро - в {webinar_dt.strftime('%H:%M')}. Ты узнаешь секреты спортивной фотосессии. 
-
-После вебинара ты уже будешь знать:
-
-✅ Как выйти на стабильную съёмку спортивных мероприятий
-✅ Какие настройки использовать для крутых кадров
-✅ И как сразу получать заказы без рекламы и продвижения
-
-⚠ Записи вебинара не будет — будь онлайн, чтобы не упустить возможности!"""))
+        reminders.append((webinar_dt - timedelta(hours=1), f"⏳ Just 1 hour left until your webinar!"))
     if webinar_dt > now:
-        reminders.append((webinar_dt, f"""Мы начали! 🎬
-
-Вебинар о спортивной фотосъёмке уже идёт!
-Заходи скорее, чтобы не пропустить полезную информацию и живую демонстрацию.
-
-Ты успеешь узнать:
-
-✅ Как выйти на стабильную съёмку спортивных мероприятий
-✅ Какие настройки использовать для крутых кадров
-✅ И как сразу получать заказы без рекламы и продвижения
-
-⚠ Записи не будет — подключайся прямо сейчас!
-{webinar.get('link', '')}"""))
+        reminders.append((webinar_dt, f"🚀 Your webinar is starting now! Join: {webinar.get('link', '')}"))
     # If user registered less than 1 hour before, only send the relevant reminders
     # (i.e., if only the 'at start' reminder is in the future, only schedule that)
     for remind_time, msg in reminders:
@@ -100,8 +75,82 @@ def schedule_all_reminders():
     for reg in registrations:
         schedule_reminders_for_registration(reg, webinars_by_id)
 
+# Google Drive sync functions
+def get_drive_service():
+    creds = get_service_account_credentials()
+    return build('drive', 'v3', credentials=creds)
+
+def find_file_metadata(service, folder_id, file_name):
+    query = f"name='{file_name}' and '{folder_id}' in parents and trashed=false"
+    results = service.files().list(q=query, fields="files(id, name, mimeType)").execute()
+    files = results.get('files', [])
+    if not files:
+        raise FileNotFoundError(f"File '{file_name}' not found in folder '{folder_id}'")
+    return files[0]  # returns dict with id, name, mimeType
+
+def download_excel_file(service, file_id, mime_type, local_path):
+    if mime_type == 'application/vnd.google-apps.spreadsheet':
+        # Export Google Sheet as Excel
+        request = service.files().export_media(fileId=file_id, mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    else:
+        # Download native Excel file
+        request = service.files().get_media(fileId=file_id)
+    fh = io.FileIO(local_path, 'wb')
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    fh.close()
+
+def update_excel_sheet(local_path, registrations):
+    # Load Excel file
+    with pd.ExcelWriter(local_path, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+        df = pd.DataFrame(registrations)
+        df.to_excel(writer, sheet_name='Sheet1', index=False)
+    # openpyxl preserves other sheets/styles
+
+def upload_excel_file(service, file_id, local_path, mime_type):
+    if mime_type == 'application/vnd.google-apps.spreadsheet':
+        # Re-upload as Google Sheet (convert Excel to Google Sheet)
+        media = MediaFileUpload(local_path, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        updated = service.files().update(
+            fileId=file_id,
+            media_body=media,
+            body={'mimeType': 'application/vnd.google-apps.spreadsheet'}
+        ).execute()
+    else:
+        # Replace Excel file
+        media = MediaFileUpload(local_path, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        updated = service.files().update(fileId=file_id, media_body=media).execute()
+    return updated
+
+def sync_registrations_to_drive():
+    """Sync registrations to Google Drive Excel file"""
+    try:
+        # 1. Fetch registrations from Supabase
+        registrations = fetch_registrations()
+        # 2. Authenticate and find file in Drive
+        service = get_drive_service()
+        folder_id = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
+        file_metadata = find_file_metadata(service, folder_id, EXCEL_FILE_NAME)
+        file_id = file_metadata['id']
+        mime_type = file_metadata['mimeType']
+        # 3. Download the file (export if Google Sheet)
+        local_path = EXCEL_FILE_NAME
+        download_excel_file(service, file_id, mime_type, local_path)
+        # 4. Update Sheet1
+        update_excel_sheet(local_path, registrations)
+        # 5. Upload back to Drive (replace original, convert if needed)
+        upload_excel_file(service, file_id, local_path, mime_type)
+        print(f"✅ Successfully synced registrations to '{EXCEL_FILE_NAME}' in Google Drive.")
+    except Exception as e:
+        print(f"❌ Error syncing to Google Drive: {e}")
+
 # Schedule all reminders on startup
 schedule_all_reminders()
+
+# Schedule Google Drive sync every SYNC_INTERVAL_MINUTES
+scheduler.add_job(sync_registrations_to_drive, 'interval', minutes=SYNC_INTERVAL_MINUTES)
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -251,6 +300,14 @@ def test_reminders(message):
     schedule_all_reminders()
     bot.send_message(message.chat.id, "Test: All reminders have been (re)scheduled based on current data.")
 
+# TESTING: Command to manually trigger Google Drive sync
+@bot.message_handler(commands=['test_sync'])
+def test_sync(message):
+    bot.send_message(message.chat.id, "🔄 Starting manual Google Drive sync...")
+    sync_registrations_to_drive()
+    bot.send_message(message.chat.id, "✅ Manual sync completed!")
+
 if __name__ == "__main__":
     print("Bot is polling...")
+    print(f"Google Drive sync scheduled every {SYNC_INTERVAL_MINUTES} minutes")
     bot.polling(none_stop=True) 
