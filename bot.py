@@ -46,11 +46,9 @@ def schedule_reminders_for_registration(reg, webinars_by_id):
         return
     # Parse webinar date as UTC-aware
     try:
-        webinar_dt = datetime.fromisoformat(webinar['date'])
-        if webinar_dt.tzinfo is None:
-            webinar_dt = webinar_dt.replace(tzinfo=timezone.utc)
-        else:
-            webinar_dt = webinar_dt.astimezone(timezone.utc)
+        from dateutil import parser
+        dt = parser.isoparse(webinar['date'])
+        webinar_dt = dt.astimezone(timezone.utc)
     except Exception as e:
         print(f"Could not parse date for webinar {webinar_id}: {e}")
         return
@@ -83,6 +81,11 @@ def schedule_reminders_for_registration(reg, webinars_by_id):
 
 ⚠ Записи вебинара не будет — подключайся вовремя и не упусти свой шанс!"""))
     if webinar_dt > now:
+        # Debug print to check the webinar object and its link
+        print(f"[DEBUG] Scheduling 'start' reminder for chat_id={chat_id}, webinar_id={webinar_id}, webinar={webinar}")
+        link = webinar.get('link')
+        if not link:
+            link = "⚠️ Ссылка на вебинар не найдена. Пожалуйста, обратитесь к организатору."
         reminders.append((webinar_dt, f"""Мы начали! 🎬
 
 Вебинар о спортивной фотосъёмке уже идёт!
@@ -95,7 +98,7 @@ def schedule_reminders_for_registration(reg, webinars_by_id):
 ✅ И как сразу получать заказы без рекламы и продвижения
 
 ⚠ Записи не будет — подключайся прямо сейчас!
-{webinar.get('link', '')}"""))
+{link}"""))
     # If user registered less than 1 hour before, only send the relevant reminders
     # (i.e., if only the 'at start' reminder is in the future, only schedule that)
     for remind_time, msg in reminders:
