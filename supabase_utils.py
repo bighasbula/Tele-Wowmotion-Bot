@@ -7,7 +7,7 @@ from google.oauth2 import service_account
 
 load_dotenv()
 SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+SUPABASE_KEY = os.getenv('SUPABASE_API_KEY')
 
 REGISTRATIONS_ENDPOINT = f"{SUPABASE_URL}/rest/v1/registrations"
 
