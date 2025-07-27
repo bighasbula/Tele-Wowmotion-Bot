@@ -40,9 +40,15 @@ def send_reminder(chat_id, message):
 
 def schedule_reminders_for_registration(reg, webinars_by_id):
     chat_id = reg.get('telegram_id')
+    # Only use numeric chat_ids
+    try:
+        chat_id_int = int(chat_id)
+    except (TypeError, ValueError):
+        print(f"[WARNING] Skipping reminder: chat_id is not numeric: {chat_id}")
+        return
     webinar_id = str(reg.get('webinar_id'))
     webinar = webinars_by_id.get(webinar_id)
-    if not webinar or not chat_id:
+    if not webinar or not chat_id_int:
         return
     # Parse webinar date as UTC-aware
     try:
@@ -102,8 +108,8 @@ def schedule_reminders_for_registration(reg, webinars_by_id):
     # If user registered less than 1 hour before, only send the relevant reminders
     # (i.e., if only the 'at start' reminder is in the future, only schedule that)
     for remind_time, msg in reminders:
-        scheduler.add_job(send_reminder, 'date', run_date=remind_time, args=[chat_id, msg])
-        print(f"Scheduled reminder for {chat_id} at {remind_time.isoformat()} : {msg}")
+        scheduler.add_job(send_reminder, 'date', run_date=remind_time, args=[chat_id_int, msg])
+        print(f"Scheduled reminder for {chat_id_int} at {remind_time.isoformat()} : {msg}")
 
 def schedule_all_reminders():
     registrations = fetch_registrations()
