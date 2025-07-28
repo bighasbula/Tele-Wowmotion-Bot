@@ -10,6 +10,9 @@ import requests
 import pandas as pd
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+import pytz
+from dateutil import parser
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -53,8 +56,19 @@ def schedule_reminders_for_registration(reg, webinars_by_id):
     # Parse webinar date as UTC-aware
     try:
         from dateutil import parser
+        import pytz
+        #dt = parser.isoparse(webinar['date'])
+        #webinar_dt = dt.astimezone(timezone.utc)
+        local_tz = pytz.timezone('Asia/Almaty')  # Replace with your desired timezone
         dt = parser.isoparse(webinar['date'])
+        # Localize if it's a naive datetime (no tzinfo)
+        if dt.tzinfo is None:
+            dt = local_tz.localize(dt)
+            
+        # Convert to UTC for proper scheduling
         webinar_dt = dt.astimezone(timezone.utc)
+        print(f"[DEBUG] Webinar local time (Asia/Almaty): {dt}")
+        print(f"[DEBUG] Converted UTC time for scheduling: {webinar_dt}")
     except Exception as e:
         print(f"Could not parse date for webinar {webinar_id}: {e}")
         return
