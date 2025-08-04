@@ -13,6 +13,13 @@
 *.xls
 *.csv
 
+# Media files
+media/
+*.mp4
+*.mov
+*.avi
+*.mkv
+
 # Python
 __pycache__/
 *.py[cod]

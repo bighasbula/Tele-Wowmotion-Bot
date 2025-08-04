@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 import telebot
 from telebot import types
-from supabase_utils import save_registration_to_supabase, get_webinar_dates, fetch_registrations, get_service_account_credentials
+from supabase_utils import save_registration_to_supabase, get_webinar_dates, fetch_registrations, get_service_account_credentials, save_course_registration_to_supabase, update_course_payment_status, get_course_registration_by_id, get_latest_course_registration_by_telegram_id, fetch_course_registrations
 from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 import io
@@ -10,9 +10,7 @@ import requests
 import pandas as pd
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
-import pytz
-from dateutil import parser
-
+import re
 
 # Load environment variables from .env file
 load_dotenv()
@@ -22,10 +20,62 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 SYNC_INTERVAL_MINUTES = 30
 EXCEL_FILE_NAME = 'WebinarRegistrations.xlsx'
 
+# Circle video file_id (will be set after upload)
+CIRCLE_VIDEO_FILE_ID = os.getenv('CIRCLE_VIDEO_FILE_ID', '')
+
 bot = telebot.TeleBot(TOKEN)
 
 # Store user registration data temporarily
 user_data = {}
+
+# Input validation functions
+def validate_phone_number(phone):
+    """
+    Validate Kazakhstan phone number format.
+    Accepts: +7 707 123 45 67, 87071234567, 8 (707) 123-45-67, +77071234567
+    """
+    # Remove all non-digit characters except +
+    cleaned = re.sub(r'[^\d+]', '', phone)
+    
+    # Check for valid Kazakhstan mobile number patterns
+    patterns = [
+        r'^\+77\d{9}$',  # +77071234567
+        r'^87\d{9}$',    # 87071234567
+    ]
+    
+    for pattern in patterns:
+        if re.match(pattern, cleaned):
+            return True
+    
+    return False
+
+def validate_email(email):
+    """
+    Validate email format using regex.
+    """
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def format_phone_number(phone):
+    """
+    Format phone number to standard Kazakhstan format: +7 7XX XXX XX XX
+    """
+    # Remove all non-digit characters
+    cleaned = re.sub(r'[^\d]', '', phone)
+    
+    # If it starts with 8, replace with +7
+    if cleaned.startswith('8'):
+        cleaned = '7' + cleaned[1:]
+    
+    # If it doesn't start with 7, add +7
+    if not cleaned.startswith('7'):
+        cleaned = '7' + cleaned
+    
+    # Format as +7 7XX XXX XX XX
+    if len(cleaned) == 11 and cleaned.startswith('7'):
+        return f"+7 {cleaned[1:4]} {cleaned[4:7]} {cleaned[7:9]} {cleaned[9:11]}"
+    
+    return phone  # Return original if can't format
 
 # APScheduler setup
 scheduler = BackgroundScheduler(timezone=timezone.utc)
@@ -180,8 +230,30 @@ def upload_excel_file(service, file_id, local_path, mime_type):
         updated = service.files().update(fileId=file_id, media_body=media).execute()
     return updated
 
+def sync_course_registrations_to_drive():
+    """Sync course registrations to Google Drive Excel file"""
+    try:
+        # 1. Fetch course registrations from Supabase
+        course_registrations = fetch_course_registrations()
+        # 2. Authenticate and find file in Drive
+        service = get_drive_service()
+        folder_id = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
+        file_metadata = find_file_metadata(service, folder_id, 'CoursesRegistrations.xlsx')
+        file_id = file_metadata['id']
+        mime_type = file_metadata['mimeType']
+        # 3. Download the file (export if Google Sheet)
+        local_path = 'CoursesRegistrations.xlsx'
+        download_excel_file(service, file_id, mime_type, local_path)
+        # 4. Update Sheet1
+        update_excel_sheet(local_path, course_registrations)
+        # 5. Upload back to Drive (replace original, convert if needed)
+        upload_excel_file(service, file_id, local_path, mime_type)
+        print(f"✅ Successfully synced course registrations to 'CoursesRegistrations.xlsx' in Google Drive.")
+    except Exception as e:
+        print(f"❌ Error syncing course registrations to Google Drive: {e}")
+
 def sync_registrations_to_drive():
-    """Sync registrations to Google Drive Excel file"""
+    """Sync webinar registrations to Google Drive Excel file"""
     try:
         # 1. Fetch registrations from Supabase
         registrations = fetch_registrations()
@@ -202,18 +274,219 @@ def sync_registrations_to_drive():
     except Exception as e:
         print(f"❌ Error syncing to Google Drive: {e}")
 
+def sync_all_to_drive():
+    """Sync both webinar and course registrations to Google Drive"""
+    print("🔄 Starting sync of all registrations to Google Drive...")
+    sync_registrations_to_drive()
+    sync_course_registrations_to_drive()
+    print("✅ All sync operations completed.")
+
 # Schedule all reminders on startup
-schedule_all_reminders()
+try:
+    schedule_all_reminders()
+    print("✅ Successfully scheduled all reminders on startup")
+except Exception as e:
+    print(f"⚠️ Warning: Could not schedule reminders on startup: {e}")
+    print("Bot will continue running, but reminders may not be scheduled until next restart")
 
 # Schedule Google Drive sync every SYNC_INTERVAL_MINUTES
-scheduler.add_job(sync_registrations_to_drive, 'interval', minutes=SYNC_INTERVAL_MINUTES)
+scheduler.add_job(sync_all_to_drive, 'interval', minutes=SYNC_INTERVAL_MINUTES)
+
+@bot.message_handler(commands=['upload_circle'])
+def upload_circle_video(message):
+    """Admin command to upload circle video and get file_id"""
+    # Check if user is admin (you can customize this check)
+    admin_chat_id = os.getenv('ADMIN_CHAT_ID')
+    if not admin_chat_id or str(message.chat.id) != admin_chat_id:
+        bot.reply_to(message, "❌ Эта команда доступна только администратору.")
+        return
+    
+    try:
+        # Send the video from local file
+        with open('media/intro_circle.mp4', 'rb') as video_file:
+            sent_video = bot.send_video_note(message.chat.id, video_file)
+            
+        # Get and display the file_id
+        file_id = sent_video.video_note.file_id
+        bot.reply_to(message, f"✅ Круговое видео загружено!\n\n📋 File ID для .env:\nCIRCLE_VIDEO_FILE_ID={file_id}\n\n💡 Скопируйте этот ID в переменную окружения CIRCLE_VIDEO_FILE_ID")
+        
+    except FileNotFoundError:
+        bot.reply_to(message, "❌ Файл media/intro_circle.mp4 не найден. Убедитесь, что файл существует в папке media/")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка при загрузке видео: {e}")
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    # Send circle video if file_id is available
+    if CIRCLE_VIDEO_FILE_ID:
+        try:
+            bot.send_video_note(message.chat.id, CIRCLE_VIDEO_FILE_ID)
+        except Exception as e:
+            print(f"Error sending circle video: {e}")
+            # Continue with normal flow even if video fails
+    
+    # Small delay to let video load
+    import time
+    time.sleep(1)
+    
+    markup = types.InlineKeyboardMarkup()
+    webinar_btn = types.InlineKeyboardButton('📅 Вебинар', callback_data='webinar_main')
+    course_btn = types.InlineKeyboardButton('📸 Обучающий курс', callback_data='course_main')
+    markup.add(webinar_btn, course_btn)
+    
+    welcome_text = """Привет! 👋  
+Мы — команда Wowmotion. Здесь ты получишь всю информацию о вебинаре и обучающем курсе.
+
+Выбери, что тебя интересует:"""
+    
+    bot.send_message(message.chat.id, welcome_text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'webinar_main')
+def handle_webinar_main(call):
     markup = types.InlineKeyboardMarkup()
     register_btn = types.InlineKeyboardButton('Зарегистрироваться', callback_data='register')
     markup.add(register_btn)
-    bot.send_message(message.chat.id, "Добро пожаловать в бот для вебинаров!", reply_markup=markup)
+    bot.send_message(call.message.chat.id, "Добро пожаловать в бот для вебинаров!", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'course_main')
+def handle_course_main(call):
+    markup = types.InlineKeyboardMarkup()
+    how_btn = types.InlineKeyboardButton('📖 Как проходит обучение', callback_data='course_how')
+    program_btn = types.InlineKeyboardButton('📚 Программа курса', callback_data='course_program')
+    payment_btn = types.InlineKeyboardButton('💳 Стоимость и оплата', callback_data='course_payment')
+    faq_btn = types.InlineKeyboardButton('❓ Вопрос–ответ', callback_data='course_faq')
+    markup.add(how_btn, program_btn, payment_btn, faq_btn)
+    
+    course_text = """👨‍🏫 Это обучающий курс на 5 недель для тех, кто хочет освоить спортивную съёмку и начать зарабатывать.
+Идеально для начинающих и тех, кто уже фотографирует, но хочет освоить новое направление."""
+    
+    bot.send_message(call.message.chat.id, course_text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'course_how')
+def handle_course_how(call):
+    markup = types.InlineKeyboardMarkup()
+    back_btn = types.InlineKeyboardButton('Назад', callback_data='course_main')
+    markup.add(back_btn)
+    
+    how_text = """📆 Обучение длится 4 недели + 1 неделя практика  
+🧠 Формат: видеоуроки + разборы + домашние задания  
+📍 Всё проходит онлайн, с поддержкой куратора"""
+    
+    bot.send_message(call.message.chat.id, how_text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'course_program')
+def handle_course_program(call):
+    markup = types.InlineKeyboardMarkup()
+    back_btn = types.InlineKeyboardButton('Назад', callback_data='course_main')
+    markup.add(back_btn)
+    
+    program_text = """📚 ПРОГРАММА КУРСА
+
+🔹 Блок 1: Введение в спортивную фотографию
+
+🎬 Понимание жанра и потенциала
+
+— Что такое спортивная съёмка и в чём её уникальность
+— Кто заказывает спортивные фото и где они нужны
+— Примеры успешных работ и направлений
+— Почему это востребовано и как начать даже без опыта
+
+⸻
+
+🔹 Блок 2: Основы фотографии
+
+📸 Техническая база, без которой не обойтись
+
+— Камера, объективы, аксессуары
+— Выдержка, диафрагма, ISO, фокус
+— Свет, композиция и цвет
+— Как подготовиться к съёмке
+
+⸻
+
+🔹 Блок 3: Съёмка спорта на практике
+
+🎯 Всё о том, как поймать момент и снять динамику
+
+— Как снимать разные виды спорта (гимнастика, танцы, бокс и др.)
+— Как выбрать точку съёмки и не мешать соревнованию
+— Настройки камеры в сложных условиях
+— Секреты «идеального кадра» в движении
+
+⸻
+
+🔹 Блок 4: Работа с клиентами и организация съёмок
+
+🤝 Как стать востребованным фотографом
+
+— Как общаться с клиентами: спортсмены, родители, тренеры
+— Как выстраивать съёмочный процесс
+— Как брать заказы и продавать фото
+— Типичные ошибки и как их избежать
+
+⸻
+
+🔹 Блок 5: Практика, портфолио и рост
+
+🚀 Старт твоей карьеры
+
+— Практическая съёмка с куратором
+— Анализ и обратная связь
+— Как собрать портфолио
+— Как развиваться в этом направлении и попасть в команду WOWMOTION
+— Именной сертификат по завершению
+⸻
+"""
+    
+    bot.send_message(call.message.chat.id, program_text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'course_payment')
+def handle_course_payment(call):
+    markup = types.InlineKeyboardMarkup()
+    pay_btn = types.InlineKeyboardButton('🔐 Оплатить курс', callback_data='course_pay')
+    back_btn = types.InlineKeyboardButton('Назад', callback_data='course_main')
+    markup.add(pay_btn, back_btn)
+    
+    payment_text = """💰 Полная стоимость курса: 150,000₸  
+🎁 Бонус: участие в закрытом чате, сертификат и поддержка после курса  
+💵 Оплата на Kaspi / переводом  
+📍 Место бронируется после оплаты
+
+Есть вопросы? Напиши нам в Instagram или WhatsApp:
+📸 @wowmotion_photo_video
+📞 [номер WhatsApp]
+Мы на связи и рады помочь!"""
+    
+    bot.send_message(call.message.chat.id, payment_text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'course_pay')
+def handle_course_pay(call):
+    chat_id = call.message.chat.id
+    user_data[chat_id] = {'type': 'course'}
+    bot.send_message(chat_id, "Для регистрации на курс, пожалуйста, напишите ваше полное имя:")
+    bot.register_next_step_handler_by_chat_id(chat_id, process_course_full_name)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'course_faq')
+def handle_course_faq(call):
+    markup = types.InlineKeyboardMarkup()
+    back_btn = types.InlineKeyboardButton('Назад', callback_data='course_main')
+    markup.add(back_btn)
+    
+    faq_text = """❓ ЧАСТО ЗАДАВАЕМЫЕ ВОПРОСЫ
+
+🟢 Я новичок. Мне подойдёт курс?
+— Да! Курс подходит для начинающих и тех, кто хочет новое направление.
+
+🟢 У меня нет крутой камеры.
+— Подойдёт любая камера — главное начать! Мы подскажем, как работать с тем, что у тебя есть.
+
+🟢 Будет ли сертификат?
+— Да, при прохождении всех занятий и практике — ты получаешь именной сертификат.
+
+🟢 Я пропустил вебинар. Будет запись?
+— Да, всем участникам вебинара отправим запись."""
+    
+    bot.send_message(call.message.chat.id, faq_text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'register')
 def handle_register(call):
@@ -264,6 +537,175 @@ def handle_date_selection(call):
     except Exception as e:
         bot.send_message(chat_id, f"Ошибка при обработке вашего выбора: {e}")
 
+def process_course_full_name(message):
+    chat_id = message.chat.id
+    user_data[chat_id]['full_name'] = message.text
+    bot.send_message(chat_id, "Пожалуйста, напишите свой номер телефона:")
+    bot.register_next_step_handler_by_chat_id(chat_id, process_course_phone)
+
+def process_course_phone(message):
+    chat_id = message.chat.id
+    phone = message.text.strip()
+    
+    # Validate phone number
+    if not validate_phone_number(phone):
+        bot.send_message(chat_id, "🚫 Пожалуйста, введите корректный номер телефона (пример: +77011234567)")
+        bot.register_next_step_handler_by_chat_id(chat_id, process_course_phone)
+        return
+    
+    # Format phone number to standard format
+    formatted_phone = format_phone_number(phone)
+    user_data[chat_id]['phone'] = formatted_phone
+    user_data[chat_id]['telegram_username'] = message.from_user.username
+    
+    # Save course registration to Supabase
+    success = save_course_registration_to_supabase(user_data[chat_id], chat_id, message.from_user.username)
+    
+    if success:
+        # Fetch the registration ID from the database
+        registration = get_latest_course_registration_by_telegram_id(chat_id)
+        
+        if registration and registration.get('id'):
+            registration_id = registration['id']
+            user_data[chat_id]['registration_id'] = registration_id
+            print(f"Retrieved registration ID from database: {registration_id}")
+        else:
+            print("Warning: Could not retrieve registration ID from database")
+            user_data[chat_id]['registration_id'] = None
+        
+        bot.send_message(chat_id, "✅ Регистрация на курс прошла успешно!")
+        
+        # Send payment instructions
+        payment_instructions = """💳 ИНСТРУКЦИИ ПО ОПЛАТЕ
+
+💰 Стоимость курса: 150,000₸
+
+📱 Оплата через Kaspi:
+• Ссылка: https://pay.kaspi.kz/pay/s6llvgtb
+• Получатель: [WowMotion]
+• Назначение: Курс спортивной съёмки
+
+
+📸 После оплаты, пожалуйста, отправьте фото чека для подтверждения."""
+        
+        bot.send_message(chat_id, payment_instructions)
+        bot.send_message(chat_id, "📸 Отправьте фото чека об оплате:")
+        bot.register_next_step_handler_by_chat_id(chat_id, process_payment_receipt)
+    else:
+        bot.send_message(chat_id, "⚠️ Что-то пошло не так. Пожалуйста, попробуйте снова позже.")
+
+def process_payment_receipt(message):
+    chat_id = message.chat.id
+    if message.photo:
+        # Get the largest photo size
+        photo = message.photo[-1]
+        file_id = photo.file_id
+        
+        try:
+            # Download the photo
+            file_info = bot.get_file(file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            
+            # Send confirmation to user
+            bot.send_message(chat_id, """✅ Спасибо! Ваш чек получен. Мы проверим оплату и свяжемся с вами в течение 24 часов.
+            Есть вопросы? Напиши нам в Instagram или WhatsApp:
+            📸 @wowmotion_photo_video
+            📞 [+7 (706) 651-22-93, +7 (705) 705-82-75]
+            Мы на связи и рады помочь!""")
+            
+            # Notify admin about new course registration with photo
+            admin_chat_id = os.getenv('ADMIN_CHAT_ID')  # Add this to your .env
+            if admin_chat_id:
+                try:
+                    admin_chat_id_int = int(admin_chat_id)
+                    registration_id = user_data[chat_id].get('registration_id')
+                    
+                    # Create inline keyboard with confirmation button (only if we have a real ID)
+                    markup = None
+                    if registration_id:
+                        markup = types.InlineKeyboardMarkup()
+                        confirm_btn = types.InlineKeyboardButton(
+                            '✅ Подтвердить оплату', 
+                            callback_data=f'confirm_{registration_id}'
+                        )
+                        markup.add(confirm_btn)
+                    
+                    # Send registration details
+                    registration_text = f"""🎓 Новая регистрация на курс!
+
+👤 Имя: {user_data[chat_id]['full_name']}
+📱 Телефон: {user_data[chat_id]['phone']}
+🆔 Username: @{user_data[chat_id]['telegram_username']}
+📚 План: Спортивный Фотограф (5 недель)
+💰 Статус: Ожидает подтверждения оплаты
+📅 Дата регистрации: {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
+                    
+                    if registration_id:
+                        registration_text += f"\n🆔 ID регистрации: {registration_id}"
+                    else:
+                        registration_text += "\n⚠️ ID регистрации: Не удалось получить (требуется ручная проверка)"
+                    
+                    # Send the payment receipt photo with confirmation button
+                    bot.send_photo(
+                        admin_chat_id_int, 
+                        downloaded_file, 
+                        caption=registration_text,
+                        reply_markup=markup
+                    )
+                    
+                except Exception as e:
+                    print(f"Error sending to admin: {e}")
+            else:
+                print("ADMIN_CHAT_ID not set in environment variables")
+                
+        except Exception as e:
+            print(f"Error processing payment receipt: {e}")
+            bot.send_message(chat_id, "⚠️ Ошибка при обработке чека. Пожалуйста, попробуйте снова.")
+    else:
+        bot.send_message(chat_id, "Пожалуйста, отправьте фото чека об оплате.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_'))
+def handle_payment_confirmation(call):
+    """Handle payment confirmation from admin"""
+    try:
+        # Extract registration ID from callback data
+        registration_id = call.data.replace('confirm_', '')
+        
+        # Update payment status in Supabase
+        success = update_course_payment_status(registration_id)
+        
+        if success:
+            # Get registration details to notify the user
+            registration = get_course_registration_by_id(registration_id)
+            
+            # Notify admin
+            bot.answer_callback_query(call.id, "✅ Платёж подтверждён и записан в базу данных.")
+            
+            # Update the message to show it's confirmed
+            bot.edit_message_caption(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                caption=call.message.caption + "\n\n✅ ПЛАТЁЖ ПОДТВЕРЖДЁН",
+                reply_markup=None  # Remove the button
+            )
+            
+            # Notify the original user
+            if registration and registration.get('telegram_id'):
+                try:
+                    user_chat_id = int(registration['telegram_id'])
+                    bot.send_message(
+                        user_chat_id, 
+                        "🎉 Ваша оплата подтверждена! Спасибо за регистрацию. Мы свяжемся с вами в ближайшее время."
+                    )
+                except Exception as e:
+                    print(f"Error notifying user: {e}")
+        else:
+            bot.answer_callback_query(call.id, "❌ Ошибка при подтверждении платежа.")
+            
+    except Exception as e:
+        print(f"Error in payment confirmation: {e}")
+        bot.answer_callback_query(call.id, "❌ Произошла ошибка.")
+
 def process_full_name(message):
     chat_id = message.chat.id
     user_data[chat_id]['full_name'] = message.text
@@ -272,41 +714,36 @@ def process_full_name(message):
 
 def process_email(message):
     chat_id = message.chat.id
-    user_data[chat_id]['email'] = message.text
+    email = message.text.strip()
+    
+    # Validate email
+    if not validate_email(email):
+        bot.send_message(chat_id, "❗ Пожалуйста, введите корректный email.")
+        bot.register_next_step_handler_by_chat_id(chat_id, process_email)
+        return
+    
+    user_data[chat_id]['email'] = email
     bot.send_message(chat_id, "Пожалуйста, напишите свой номер телефона")
     bot.register_next_step_handler_by_chat_id(chat_id, process_phone)
 
 def process_phone(message):
     chat_id = message.chat.id
-    user_data[chat_id]['phone'] = message.text
+    phone = message.text.strip()
+    
+    # Validate phone number
+    if not validate_phone_number(phone):
+        bot.send_message(chat_id, "❗ Пожалуйста, введите корректный номер телефона в формате +7 7XX XXX XX XX.")
+        bot.register_next_step_handler_by_chat_id(chat_id, process_phone)
+        return
+    
+    # Format phone number to standard format
+    formatted_phone = format_phone_number(phone)
+    user_data[chat_id]['phone'] = formatted_phone
+    
     # Save to Supabase
     success = save_registration_to_supabase(user_data[chat_id], chat_id, message.from_user.username)
     if success:
-        bot.send_message(chat_id, """Ты в списке! ✅ 
-
-Мы напомним тебе о вебинаре и пришлём ссылку ближе к старту. 
-
-А пока держи вдохновляющую историю 😉""")
-        bot.send_message(chat_id, """Добро пожаловать на наш вебинар! Рады видеть вас здесь 💛
-
-Мы — команда WOWMOTION 📸
-Уже много лет с любовью и профессионализмом снимаем спорт в движении — танцы, гимнастику, бокс и другие яркие направления.
-
-Что мы делаем?
-— Улавливаем красоту, силу и эмоции в каждом движении
-— Создаём эстетичный, динамичный и живой визуальный контент
-— Помогаем спортсменам, тренерам и организаторам сохранять ценные моменты на долгие годы
-
-Наша задача — не просто «снять кадр», а передать атмосферу, характер и энергию того, что происходит на площадке.
-
-Где нас найти:
-— [@wowdance.kz](https://www.instagram.com/wowdance.kz/) — для любителей танца
-— [@wowrgym.kz](https://www.instagram.com/wowrgym.kz/) — гимнастика во всей её грации
-🥊 Направление по боксу — совсем скоро в новом профиле!
-
-Благодарим вас за доверие и интерес к нашему делу. Пусть этот вебинар станет для вас источником вдохновения и новых знаний. А мы, в свою очередь, готовы делиться всем, что знаем и умеем 💫
-
-📲 Insta: [@wowmotion_photo_video](https://www.instagram.com/wowmotion_photo_video/)""",parse_mode='Markdown')
+        bot.send_message(chat_id, "✅ Регистрация прошла успешно! Вы получите напоминания перед вебинаром.")
         # Optionally, send the webinar link if available
         link = user_data[chat_id].get('link')
         if link:
@@ -327,7 +764,7 @@ def process_phone(message):
             bot.send_message(chat_id, f"""🎥 Вебинар "Секреты спортивной съёмки"
 📅 Дата: {formatted_date}
 📍 Формат: онлайн
-👤 Организатор: [@wowmotion_photo_video](https://www.instagram.com/wowmotion_photo_video/)
+👤 Организатор: @wowmotion_photo_video
 
 🔓 Что вас ждёт:
 — Как красиво снимать спорт в движении
@@ -338,8 +775,10 @@ def process_phone(message):
 — Советы по обработке спортивных фото
 — Как зарабатывать на спортивной съёмке
 
+📢 Подпишитесь на наш Telegram-канал, чтобы не пропустить анонсы, материалы и запись вебинара: https://t.me/wowdancechannel
+
 🎁 В конце вебинара — подарок и сертификат участника
-{link}""",parse_mode='Markdown')
+{link}""")
         # Schedule reminders for this registration
         webinars_by_id = get_webinars_by_id()
         reg = {
@@ -360,8 +799,24 @@ def test_reminders(message):
 @bot.message_handler(commands=['test_sync'])
 def test_sync(message):
     bot.send_message(message.chat.id, "🔄 Starting manual Google Drive sync...")
-    sync_registrations_to_drive()
+    sync_all_to_drive()
     bot.send_message(message.chat.id, "✅ Manual sync completed!")
+
+# TESTING: Command to manually trigger course registrations sync only
+@bot.message_handler(commands=['test_course_sync'])
+def test_course_sync(message):
+    bot.send_message(message.chat.id, "🔄 Starting manual course registrations sync...")
+    sync_course_registrations_to_drive()
+    bot.send_message(message.chat.id, "✅ Course registrations sync completed!")
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    chat_id = message.chat.id
+    if chat_id in user_data and user_data[chat_id].get('type') == 'course':
+        # This is a payment receipt for course registration
+        process_payment_receipt(message)
+    else:
+        bot.send_message(chat_id, "Пожалуйста, используйте команду /start для начала работы с ботом.")
 
 if __name__ == "__main__":
     print("Bot is polling...")

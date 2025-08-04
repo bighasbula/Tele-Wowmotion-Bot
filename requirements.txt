@@ -5,4 +5,5 @@ pandas==2.1.4
 openpyxl==3.1.2
 google-api-python-client==2.108.0
 google-auth==2.25.2
-APScheduler==3.10.4 
+APScheduler==3.10.4
+python-dateutil==2.8.2 
