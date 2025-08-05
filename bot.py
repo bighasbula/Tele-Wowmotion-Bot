@@ -22,6 +22,7 @@ EXCEL_FILE_NAME = 'WebinarRegistrations.xlsx'
 
 # Circle video file_id (will be set after upload)
 CIRCLE_VIDEO_FILE_ID = os.getenv('CIRCLE_VIDEO_FILE_ID', '')
+CIRCLE_VIDEO_FILE_ID2 = os.getenv('CIRCLE_VIDEO_FILE_ID2', '')
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -318,16 +319,7 @@ def upload_circle_video(message):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     # Send circle video if file_id is available
-    if CIRCLE_VIDEO_FILE_ID:
-        try:
-            bot.send_video_note(message.chat.id, CIRCLE_VIDEO_FILE_ID)
-        except Exception as e:
-            print(f"Error sending circle video: {e}")
-            # Continue with normal flow even if video fails
     
-    # Small delay to let video load
-    import time
-    time.sleep(1)
     
     markup = types.InlineKeyboardMarkup()
     webinar_btn = types.InlineKeyboardButton('📅 Вебинар', callback_data='webinar_main')
@@ -343,6 +335,18 @@ def send_welcome(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == 'webinar_main')
 def handle_webinar_main(call):
+
+    if CIRCLE_VIDEO_FILE_ID2:
+        try:
+            bot.send_video_note(call.message.chat.id, CIRCLE_VIDEO_FILE_ID2)
+        except Exception as e:
+            print(f"Error sending circle video: {e}")
+            # Continue with normal flow even if video fails
+    
+    # Small delay to let video load
+    import time
+    time.sleep(1)
+
     markup = types.InlineKeyboardMarkup()
     register_btn = types.InlineKeyboardButton('Зарегистрироваться', callback_data='register')
     markup.add(register_btn)
@@ -350,6 +354,18 @@ def handle_webinar_main(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == 'course_main')
 def handle_course_main(call):
+
+    if CIRCLE_VIDEO_FILE_ID:
+        try:
+            bot.send_video_note(call.message.chat.id, CIRCLE_VIDEO_FILE_ID)
+        except Exception as e:
+            print(f"Error sending circle video: {e}")
+            # Continue with normal flow even if video fails
+    
+    # Small delay to let video load
+    import time
+    time.sleep(1)
+
     markup = types.InlineKeyboardMarkup()
     how_btn = types.InlineKeyboardButton('📖 Как проходит обучение', callback_data='course_how')
     program_btn = types.InlineKeyboardButton('📚 Программа курса', callback_data='course_program')
