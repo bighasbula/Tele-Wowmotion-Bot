@@ -239,12 +239,31 @@ def sync_course_registrations_to_drive():
         # 2. Authenticate and find file in Drive
         service = get_drive_service()
         folder_id = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
-        file_metadata = find_file_metadata(service, folder_id, 'CoursesRegistrations.xlsx')
-        file_id = file_metadata['id']
-        mime_type = file_metadata['mimeType']
-        # 3. Download the file (export if Google Sheet)
-        local_path = 'CoursesRegistrations.xlsx'
-        download_excel_file(service, file_id, mime_type, local_path)
+        
+        try:
+            file_metadata = find_file_metadata(service, folder_id, 'CoursesRegistrations.xlsx')
+            file_id = file_metadata['id']
+            mime_type = file_metadata['mimeType']
+            # 3. Download the file (export if Google Sheet)
+            local_path = 'CoursesRegistrations.xlsx'
+            download_excel_file(service, file_id, mime_type, local_path)
+        except FileNotFoundError:
+            print("📝 Creating new CoursesRegistrations.xlsx file in Google Drive...")
+            # Create a new Excel file with course registrations data
+            df = pd.DataFrame(course_registrations)
+            df.to_excel('CoursesRegistrations.xlsx', index=False)
+            
+            # Upload the new file to Google Drive
+            file_metadata = {
+                'name': 'CoursesRegistrations.xlsx',
+                'parents': [folder_id]
+            }
+            media = MediaFileUpload('CoursesRegistrations.xlsx', mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            file_id = file.get('id')
+            print(f"✅ Created new file with ID: {file_id}")
+            return
+        
         # 4. Update Sheet1
         update_excel_sheet(local_path, course_registrations)
         # 5. Upload back to Drive (replace original, convert if needed)
