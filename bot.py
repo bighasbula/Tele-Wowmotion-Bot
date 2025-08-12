@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 import telebot
 from telebot import types
-from supabase_utils import save_registration_to_supabase, get_webinar_dates, fetch_registrations, get_service_account_credentials, save_course_registration_to_supabase, update_course_payment_status, get_course_registration_by_id, get_latest_course_registration_by_telegram_id, fetch_course_registrations
+from supabase_utils import save_registration_to_supabase, get_webinar_dates, fetch_registrations, get_service_account_credentials, save_course_registration_to_supabase, update_course_payment_status, get_course_registration_by_id, get_latest_course_registration_by_telegram_id, fetch_course_registrations, save_user_to_supabase
 from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 import io
@@ -19,6 +19,7 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 # Easily editable sync interval (in minutes)
 SYNC_INTERVAL_MINUTES = 30
 EXCEL_FILE_NAME = 'WebinarRegistrations.xlsx'
+EXCEL_FILE_NAME_COURSES = 'CoursesRegistrations.xlsx'
 
 # Circle video file_id (will be set after upload)
 CIRCLE_VIDEO_FILE_ID = os.getenv('CIRCLE_VIDEO_FILE_ID', '')
@@ -49,6 +50,8 @@ def validate_phone_number(phone):
             return True
     
     return False
+
+
 
 def validate_email(email):
     """
@@ -241,7 +244,7 @@ def sync_course_registrations_to_drive():
         folder_id = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
         
         try:
-            file_metadata = find_file_metadata(service, folder_id, 'CoursesRegistrations.xlsx')
+            file_metadata = find_file_metadata(service, folder_id, 'EXCEL_FILE_NAME_COURSES')
             file_id = file_metadata['id']
             mime_type = file_metadata['mimeType']
             # 3. Download the file (export if Google Sheet)
@@ -337,6 +340,12 @@ def upload_circle_video(message):
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    # Save unique user to Supabase
+    try:
+        save_user_to_supabase(message.chat.id, message.from_user.username)
+    except Exception as e:
+        print(f"Error saving user to Supabase: {e}")
+    
     # Send circle video if file_id is available
     
     

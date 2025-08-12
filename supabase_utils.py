@@ -235,3 +235,68 @@ def fetch_course_registrations():
     response = requests.get(endpoint, headers=headers)
     response.raise_for_status()
     return response.json()
+
+def check_user_exists(telegram_id):
+    """
+    Check if a telegram_id already exists in the users table.
+    Returns True if user exists, False otherwise.
+    """
+    USERS_ENDPOINT = f"{SUPABASE_URL}/rest/v1/users"
+    
+    try:
+        response = requests.get(
+            f"{USERS_ENDPOINT}?telegram_id=eq.{telegram_id}",
+            headers=HEADERS
+        )
+        response.raise_for_status()
+        users = response.json()
+        return len(users) > 0
+    except Exception as e:
+        print(f"Exception checking if user exists: {e}")
+        return False
+
+def save_user_to_supabase(telegram_id, username=None):
+    """
+    Save a unique user to the users table in Supabase.
+    Returns True if successful, False otherwise.
+    
+    Required table schema:
+    CREATE TABLE users (
+      id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+      telegram_id TEXT UNIQUE NOT NULL,
+      telegram_username TEXT,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    """
+    print(f"save_user_to_supabase called with telegram_id: {telegram_id}, username: {username}")
+    
+    # First check if user already exists
+    if check_user_exists(telegram_id):
+        print(f"User with telegram_id {telegram_id} already exists, skipping save.")
+        return True
+    
+    USERS_ENDPOINT = f"{SUPABASE_URL}/rest/v1/users"
+    
+    data = {
+        "telegram_id": str(telegram_id),
+        "telegram_username": f"@{username}" if username else None,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    print("User data to send:", data)
+    print("Endpoint:", USERS_ENDPOINT)
+    print("Headers:", HEADERS)
+    
+    try:
+        response = requests.post(USERS_ENDPOINT, json=data, headers=HEADERS)
+        print("Supabase response:", response.status_code, response.text)
+        
+        if response.status_code in (200, 201):
+            print("User saved to Supabase.")
+            return True
+        else:
+            print(f"Failed to save user: {response.status_code} {response.text}")
+            return False
+    except Exception as e:
+        print(f"Exception during Supabase user save: {e}")
+        return False
